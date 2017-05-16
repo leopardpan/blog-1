@@ -1,5 +1,5 @@
-title: 互联网行业标配 —— HTTPDNS在App开发中实践方案总结
-date: 2016-07-14 02:24:16
+title: 移动解析HTTPDNS在App开发中实践总结
+date: 2016-12-03 02:24:16
 tags:
 
 - iOS 
@@ -180,7 +180,7 @@ didReceiveChallenge:(NSURLAuthenticationChallenge *)challenge
 
 
 ### **webview中H5页面部分**
-在实施webview的HTTPDNS时，我们也遇到了问题：
+HTTPDNS实施的主要难点与坑点都在H5页面上面，下面逐条记录下在实施webview的HTTPDNS时遇到的问题：
 
 **问题：由于web页面的请求并不是由客户端发起，我们无法在生成request的时候修改host。**
 
@@ -334,6 +334,72 @@ NSURLProtocol子类的实现：
 }
 ````
 
+
+#### **H5页面重定向处理**
+
+作为电商客户端，里面包含大量H5的页面。在部分H5页面由于活动页面变更、新老域名兼容等原因，H5会将H5页面进行重定向处理。
+
+* 重定向
+
+简单介绍下重定向的过程：
+
+**|--->
+客户端浏览器发送http请求访问域名A
+--->
+web服务器接受后发送302状态码响应及对应新的域名B给客户浏览器
+--->
+客户浏览器发现是302响应，自动再发送一个新的http请求，请求url是新的域名
+--->
+服务器根据此请求寻找资源并发送给客户端浏览器
+---|**
+
+
+以上就是重定向的整个过程。当我们在某个版本H5页面入口写死为域名A，后续的新版本的域名更改为域名B，为了兼容老版本，H5需要对域名A做域名重定向，将请求域名A请求重定向到域名B。
+
+
+我们在使用浏览器访问域名A页面时（包括UIWebView），服务器返回重定向标识，浏览器会自动重新发起重定向到域名B的请求。
+
+但是在我们实施的HTTPDNS中，我们使用了NSURLProtocol对UIWebView的请求进行拦截，对请求A域名替换为ip，并将host修改为原有域名A。而重定向发起的新的请求并没有被替换域名与修改Host，所以我们还要对此进行处理。
+
+NSURLSessionTaskDelegate 提供对应的处理重定向代理方法，我们只要在对应方法中，对重定向的逻辑进行处理。
+
+
+````objectivec
+#pragma NSURLSessionTaskDelegate
+
+- (void)URLSession:(NSURLSession *)session task:(nonnull NSURLSessionTask *)task willPerformHTTPRedirection:(nonnull NSHTTPURLResponse *)response newRequest:(nonnull NSURLRequest *)request completionHandler:(nonnull void (^)(NSURLRequest * _Nullable))completionHandler
+{
+
+    NSMutableURLRequest *mutableReq = [request mutableCopy];
+    [NSURLProtocol setProperty:@(YES) forKey:protocolKey inRequest:mutableReq];
+    
+    NSURL *url = mutableReq.URL;
+    NSString *urlString = [url.absoluteString urlEncode];
+    // 获取IP地址
+    NSString *ip = nil;
+    if([[HttpDNS shareInstance] shouldGetHostByUrl:urlString]) {
+        ip = [[HttpDNS shareInstance] getHostByNameSyn:urlString];
+    }
+    //    NSLog(@" *** originalUrl %@ ip %@ from HTTPDNS loading...", request.URL, ip);
+    
+    if (ip) {
+        // 通过HTTPDNS获取IP成功，进行URL替换和HOST头设置
+        //        NSLog(@"*** Get IP(%@) for host(%@) from HTTPDNS Successfully!", ip, url.host);
+        mutableReq.URL = [NSURL URLWithString:ip];
+    }
+    
+    // 添加原始URL的host
+    [mutableReq setValue:url.host forHTTPHeaderField:@"host"];
+    // 添加originalUrl保存原始URL
+    [mutableReq addValue:urlString forHTTPHeaderField:@"originalUrl"];
+    
+    completionHandler(mutableReq);
+    
+}
+````
+
+
+其中我们将mutableReq的域名与Host进行修改，并将其传回completionHandler，让NSURLSession继续处理接下来的重定向进程即可。
 
 
 # 其他优化
